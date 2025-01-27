@@ -8,6 +8,7 @@ COLUMN
 [, COLUMN ...]
 [ from ROOT [, ROOT...] ]
 [where EXPR]
+[group by COLUMNS]
 [order by COLUMNS]
 [limit N]
 [into FORMAT]
@@ -136,6 +137,8 @@ is_hidden
 .IP \(bu
 has_xattrs
 .IP \(bu
+capabilities or caps
+.IP \(bu
 is_shebang
 .IP \(bu
 is_empty
@@ -191,6 +194,8 @@ is_audio
 is_book
 .IP \(bu
 is_doc
+.IP \(bu
+is_font
 .IP \(bu
 is_image
 .IP \(bu

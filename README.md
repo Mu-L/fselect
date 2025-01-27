@@ -15,7 +15,7 @@ While it doesn't tend to fully replace traditional `find` and `ls`, **fselect** 
 * `.gitignore`, `.hgignore`, and `.dockerignore` support (experimental)
 * search by width and height of images, EXIF metadata
 * search by MP3 info
-* search by extended file attributes
+* search by extended file attributes and Linux capabilities
 * search by file hashes
 * search by MIME type
 * shortcuts to common file types
@@ -35,17 +35,24 @@ More is under way!
 
 [AUR package](https://aur.archlinux.org/packages/fselect/), thanks to [@asm0dey](https://github.com/asm0dey)
 
+[AUR bin package](https://aur.archlinux.org/packages/fselect-bin/), thanks to [@4censord](https://github.com/4censord)
+
 #### NixOS
 
 [`fselect` in `nixpkgs`](https://github.com/filalex77/nixpkgs/blob/1eced92263395896c10cea69e5f60e8be5f43aeb/pkgs/tools/misc/fselect/default.nix), thanks to [@filalex77](https://github.com/filalex77)
 
 #### Other Linux
 
-[Static build with musl](https://github.com/jhspetersson/fselect/releases/download/0.8.1/fselect-x86_64-linux-musl.gz).
+[Static build with musl](https://github.com/jhspetersson/fselect/releases/download/0.8.8/fselect-x86_64-linux-musl.gz).
 
 #### Windows 64bit
 
-A statically precompiled [binary](https://github.com/jhspetersson/fselect/releases/download/0.8.1/fselect-x86_64-win.zip) is available at Github downloads.
+A statically precompiled [binary](https://github.com/jhspetersson/fselect/releases/download/0.8.8/fselect-x86_64-win.zip) is available at GitHub downloads.
+
+#### Windows via winget
+
+* Install [winget](https://github.com/microsoft/winget-cli)
+* Run `winget install -e --id fselect.fselect`
 
 #### Windows via Chocolatey
 
@@ -73,7 +80,7 @@ A statically precompiled [binary](https://github.com/jhspetersson/fselect/releas
 
 ### Usage
 
-    fselect [ARGS] COLUMN[, COLUMN...] [from ROOT[, ROOT...]] [where EXPR] [order by COLUMNS] [limit N] [into FORMAT]
+    fselect [ARGS] COLUMN[, COLUMN...] [from ROOT[, ROOT...]] [where EXPR] [group by COLUMNS] [order by COLUMNS] [limit N] [into FORMAT]
 
 ### Interactive mode
 
@@ -97,9 +104,14 @@ Or put all the arguments into the quotes like this:
 
     fselect "name from /home/user/tmp where size > 0"
 
-Find files (just names) with any content (size > 0):
+Search within a directory name with spaces (backticks are also supported):
 
-    fselect name from /home/user/tmp where size gt 0
+    fselect "name from '/home/user/dir with spaces' where size > 0"
+    fselect "name from `/home/user/dir with spaces` where size > 0"
+
+Or simply escape the single quotes:
+
+    fselect name from \'/home/user/dir with spaces\' where size gt 0
 
 Specify file size, get absolute path, and add it to the results:
 
@@ -107,6 +119,7 @@ Specify file size, get absolute path, and add it to the results:
     fselect size, abspath from ./tmp where size gt 2g
     fselect fsize, abspath from ./tmp where size = 5m
     fselect hsize, abspath from ./tmp where size lt 8k
+    fselect name, size from ./tmp where size between 5mb and 6mb
     
 More complex query:
 
@@ -120,7 +133,7 @@ Formatting functions:
 
     fselect "LOWER(name), UPPER(name), LENGTH(name), YEAR(modified) from /home/user/Downloads"
     
-Get the year of an oldest file:
+Get the year of the oldest file:
 
     fselect "MIN(YEAR(modified)) from /home/user"
     
@@ -197,6 +210,7 @@ Or in combination:
 Enable `.gitignore` or `.hgignore` support:
 
     fselect size, path from /home/user/projects gitignore where name = '*.cpp'
+    fselect size, path from /home/user/projects git where name = '*.cpp'    
     fselect size, path from /home/user/projects hgignore where name = '*.py'        
     
 Search by image dimensions:
@@ -258,6 +272,10 @@ Find files with xattrs, check if particular xattr exists, or get its value:
 Include arbitrary text as columns:
 
     fselect "name, ' has size of ', size, ' bytes'"
+
+Group results:
+
+    fselect "ext, count(*) from /tmp group by ext"            
 
 Order results:
 

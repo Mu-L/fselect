@@ -1,20 +1,25 @@
-#[macro_use]
-extern crate lazy_static;
+//! The entry point of the program
+//! Handles the command line arguments parsing
+
 #[macro_use]
 extern crate serde_derive;
 #[cfg(all(unix, feature = "users"))]
-extern crate users;
+extern crate uzers;
 #[cfg(unix)]
 extern crate xattr;
 
 use std::env;
+use std::io::{stdout, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
+#[cfg(feature = "update-notifications")]
+use std::time::Duration;
 
-use atty::Stream;
 use nu_ansi_term::Color::*;
 use rustyline::error::ReadlineError;
-use rustyline::Editor;
+use rustyline::DefaultEditor;
+#[cfg(feature = "update-notifications")]
+use update_informer::{registry, Check};
 
 mod config;
 mod expr;
@@ -38,17 +43,19 @@ use crate::util::error_message;
 use crate::util::str_to_bool;
 
 fn main() -> ExitCode {
+    let default_config = Config::default();
+
     let mut config = match Config::new() {
         Ok(cnf) => cnf,
         Err(err) => {
             eprintln!("{}", err);
-            Config::default()
+            default_config.clone()
         }
     };
 
-    let env_var_value = std::env::var("NO_COLOR").ok().unwrap_or(String::new());
+    let env_var_value = std::env::var("NO_COLOR").ok().unwrap_or_default();
     let env_no_color = str_to_bool(&env_var_value).unwrap_or(false);
-    let mut no_color = env_no_color || (config.no_color.is_some() && config.no_color.unwrap());
+    let mut no_color = env_no_color || config.no_color.unwrap_or(false);
 
     #[cfg(windows)]
     {
@@ -57,7 +64,7 @@ fn main() -> ExitCode {
             let win_init_ok = match res {
                 Ok(()) => true,
                 Err(203) => true,
-                _ => false
+                _ => false,
             };
             no_color = !win_init_ok;
         }
@@ -79,8 +86,12 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    if first_arg.contains("help") || first_arg.starts_with("-h") || first_arg.starts_with("/?") || first_arg.starts_with("/h") {
-        usage_info(config, no_color);
+    if first_arg.contains("help")
+        || first_arg.starts_with("-h")
+        || first_arg.starts_with("/?")
+        || first_arg.starts_with("/h")
+    {
+        usage_info(config, default_config, no_color);
         return ExitCode::SUCCESS;
     }
 
@@ -89,15 +100,21 @@ fn main() -> ExitCode {
     loop {
         if first_arg.contains("nocolor") || first_arg.contains("no-color") {
             no_color = true;
-        } else if first_arg.starts_with("-i") || first_arg.starts_with("--i") || first_arg.starts_with("/i") {
+        } else if first_arg.starts_with("-i")
+            || first_arg.starts_with("--i")
+            || first_arg.starts_with("/i")
+        {
             interactive = true;
-        } else if first_arg.starts_with("-c") || first_arg.starts_with("--config") || first_arg.starts_with("/c") {
+        } else if first_arg.starts_with("-c")
+            || first_arg.starts_with("--config")
+            || first_arg.starts_with("/c")
+        {
             let config_path = args[1].to_ascii_lowercase();
             config = match Config::from(PathBuf::from(&config_path)) {
                 Ok(cnf) => cnf,
                 Err(err) => {
                     eprintln!("{}", err);
-                    Config::default()
+                    default_config.clone()
                 }
             };
 
@@ -124,28 +141,32 @@ fn main() -> ExitCode {
     let mut exit_value = None::<u8>;
 
     if interactive {
-        match Editor::<()>::new() {
-            Ok(mut rl) => {
-                loop {
-                    let readline = rl.readline("query> ");
-                    match readline {
-                        Ok(query) => {
-                            rl.add_history_entry(query.as_str());
-                            exec_search(query, &config, no_color);
-                        },
-                        Err(ReadlineError::Interrupted) => {
-                            println!("CTRL-C");
-                            break
-                        },
-                        Err(ReadlineError::Eof) => {
-                            println!("CTRL-D");
-                            break
-                        },
-                        Err(err) => {
-                            let err = format!("{:?}", err);
-                            error_message("input", &err);
-                            break
-                        }
+        match DefaultEditor::new() {
+            Ok(mut rl) => loop {
+                let readline = rl.readline("query> ");
+                match readline {
+                    Ok(cmd)
+                        if cmd.to_ascii_lowercase().trim() == "quit"
+                            || cmd.to_ascii_lowercase().trim() == "exit" =>
+                    {
+                        break
+                    }
+                    Ok(query) => {
+                        let _ = rl.add_history_entry(query.as_str());
+                        exec_search(vec![query], &mut config, &default_config, no_color);
+                    }
+                    Err(ReadlineError::Interrupted) => {
+                        println!("CTRL-C");
+                        break;
+                    }
+                    Err(ReadlineError::Eof) => {
+                        println!("CTRL-D");
+                        break;
+                    }
+                    Err(err) => {
+                        let err = format!("{:?}", err);
+                        error_message("input", &err);
+                        break;
                     }
                 }
             },
@@ -155,11 +176,22 @@ fn main() -> ExitCode {
             }
         }
     } else {
-        let query = args.join(" ");
-        exit_value = Some(exec_search(query, &config, no_color));
+        exit_value = Some(exec_search(args, &mut config, &default_config, no_color));
     }
 
     config.save();
+
+    #[cfg(feature = "update-notifications")]
+    if config.check_for_updates.unwrap_or(false) && stdout().is_terminal() {
+        let name = env!("CARGO_PKG_NAME");
+        let version = env!("CARGO_PKG_VERSION");
+        let informer = update_informer::new(registry::Crates, name, version)
+            .interval(Duration::from_secs(60 * 60 * 24));
+
+        if let Some(version) = informer.check_version().ok().flatten() {
+            println!("\nNew version is available! : {}", version);
+        }
+    }
 
     if let Some(exit_value) = exit_value {
         return ExitCode::from(exit_value);
@@ -168,9 +200,9 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn exec_search(query: String, config: &Config, no_color: bool) -> u8 {
+fn exec_search(query: Vec<String>, config: &mut Config, default_config: &Config, no_color: bool) -> u8 {
     let mut p = Parser::new();
-    let query = p.parse(&query, config.debug);
+    let query = p.parse(query, config.debug);
 
     if config.debug {
         dbg!(&query);
@@ -178,24 +210,27 @@ fn exec_search(query: String, config: &Config, no_color: bool) -> u8 {
 
     match query {
         Ok(query) => {
-            let is_terminal = atty::is(Stream::Stdout);
+            let is_terminal = stdout().is_terminal();
             let use_colors = !no_color && is_terminal;
 
-            let mut searcher = Searcher::new(query, config.clone(), use_colors);
+            let mut searcher = Searcher::new(&query, config, default_config, use_colors);
             searcher.list_search_results().unwrap();
 
             let error_count = searcher.error_count;
             match error_count {
                 0 => 0,
-                _ => 1
+                _ => 1,
             }
-        },
-        Err(err) => { error_message("query", &err); 2 }
+        }
+        Err(err) => {
+            error_message("query", &err);
+            2
+        }
     }
 }
 
 fn short_usage_info(no_color: bool) {
-    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
 
     print!("fselect ");
 
@@ -210,37 +245,69 @@ fn short_usage_info(no_color: bool) {
     if no_color {
         println!("https://github.com/jhspetersson/fselect");
     } else {
-        println!("{}", Cyan.underline().paint("https://github.com/jhspetersson/fselect"));
+        println!(
+            "{}",
+            Cyan.underline()
+                .paint("https://github.com/jhspetersson/fselect")
+        );
     }
 
     println!();
-    println!("Usage: fselect [ARGS] COLUMN[, COLUMN...] [from PATH[, PATH...]] [where EXPR] [order by COLUMN (asc|desc), ...] [limit N] [into FORMAT]");
+    println!("Usage: fselect [ARGS] COLUMN[, COLUMN...] [from PATH[, PATH...]] [where EXPR] [group by COLUMN, ...] [order by COLUMN (asc|desc), ...] [limit N] [into FORMAT]");
 }
 
 fn help_hint() {
-    println!("
-For more detailed instructions please refer to the URL above or run fselect --help");
+    println!(
+        "
+For more detailed instructions please refer to the URL above or run fselect --help"
+    );
 }
 
-fn usage_info(config: Config, no_color: bool) {
+fn usage_info(config: Config, default_config: Config, no_color: bool) {
     short_usage_info(no_color);
 
-    let is_archive = config.is_archive.join(", ");
-    let is_audio = config.is_audio.join(", ");
-    let is_book = config.is_book.join(", ");
-    let is_doc = config.is_doc.join(", ");
-    let is_image = config.is_image.join(", ");
-    let is_source = config.is_source.join(", ");
-    let is_video = config.is_video.join(", ");
+    let is_archive = config
+        .is_archive
+        .unwrap_or(default_config.is_archive.unwrap())
+        .join(", ");
+    let is_audio = config
+        .is_audio
+        .unwrap_or(default_config.is_audio.unwrap())
+        .join(", ");
+    let is_book = config
+        .is_book
+        .unwrap_or(default_config.is_book.unwrap())
+        .join(", ");
+    let is_doc = config
+        .is_doc
+        .unwrap_or(default_config.is_doc.unwrap())
+        .join(", ");
+    let is_font = config
+        .is_font
+        .unwrap_or(default_config.is_font.unwrap())
+        .join(", ");
+    let is_image = config
+        .is_image
+        .unwrap_or(default_config.is_image.unwrap())
+        .join(", ");
+    let is_source = config
+        .is_source
+        .unwrap_or(default_config.is_source.unwrap())
+        .join(", ");
+    let is_video = config
+        .is_video
+        .unwrap_or(default_config.is_video.unwrap())
+        .join(", ");
 
     println!("
-Files Detected as Archives: {}
-Files Detected as Audio: {}
-Files Detected as Book: {}
-Files Detected as Document: {}
-Files Detected as Image: {}
-Files Detected as Source Code: {}
-Files Detected as Video: {}
+Files Detected as Archives: {is_archive}
+Files Detected as Audio: {is_audio}
+Files Detected as Book: {is_book}
+Files Detected as Document: {is_doc}
+Files Detected as Fonts: {is_font}
+Files Detected as Image: {is_image}
+Files Detected as Source Code: {is_source}
+Files Detected as Video: {is_video}
 
 Path Options:
     mindepth N 	                    Minimum search depth. Default is unlimited. Depth 1 means skip one directory level and search further.
@@ -285,6 +352,7 @@ Column Options:
     is_socket                       Returns a boolean signifying whether the file path is a socket file
     is_hidden                       Returns a boolean signifying whether the file is a hidden file (e.g., files that start with a dot on *nix)
     has_xattrs                      Returns a boolean signifying whether the file has extended attributes
+    capabilities | caps             Returns a string describing Linux capabilities assigned to a file
 
     device (Linux only)             Returns the code of device the file is stored on
     inode (Linux only)              Returns the number of inode
@@ -345,6 +413,7 @@ Column Options:
     is_audio                        Returns a boolean signifying whether the file is an audio file
     is_book                         Returns a boolean signifying whether the file is a book
     is_doc                          Returns a boolean signifying whether the file is a document
+    is_font                         Returns a boolean signifying whether the file is a font file
     is_image                        Returns a boolean signifying whether the file is an image
     is_source                       Returns a boolean signifying whether the file is source code
     is_video                        Returns a boolean signifying whether the file is a video file
@@ -366,7 +435,8 @@ Functions:
         VAR_POP | VARIANCE          Population variance
         VAR_SAMP                    Sample variance
     Date:
-        CURRENT_DATE | CURDATE      Returns current date
+        CURRENT_DATE | CUR_DATE |
+        CURDATE                     Returns current date
         DAY                         Returns day of the month
         MONTH                       Returns month of the year
         YEAR                        Returns year of the date
@@ -379,6 +449,8 @@ Functions:
     Xattr:
         HAS_XATTR                   Used to check if xattr exists (unix-only)
         XATTR                       Returns value of xattr (unix-only)
+        HAS_CAPABILITIES | HAS_CAPS Check if any Linux capability exists for the file
+        HAS_CAPABILITY or HAS_CAP   Check if given Linux capability exists for the file
     String:
         LENGTH | LEN                Returns length of string value
         LOWER | LOWERCASE | LCASE   Returns lowercase value
@@ -408,6 +480,7 @@ Functions:
         CONCAT                      Returns concatenated string of expression values
         CONCAT_WS                   Returns concatenated string of expression values with specified delimiter
         FORMAT_SIZE                 Returns formatted size of a file
+        FORMAT_TIME | PRETTY_TIME   Returns human-readable durations of time in seconds
         RANDOM | RAND               Returns random integer (from zero to max int, from zero to arg, or from arg1 to arg2)
 
 Expressions:
@@ -424,6 +497,7 @@ Expressions:
         !=~ | !~= | notrx           Used to check if the column value doesn't match the regex pattern
         like                        Used to check if the column value matches the pattern which follows SQL conventions
         notlike                     Used to check if the column value doesn't match the pattern which follows SQL conventions
+        between                     Used to check if the column value lies between two values inclusive
     Logical Operators:
         and                         Used as an AND operator for two conditions made with the above operators
         or                          Used as an OR operator for two conditions made with the above operators
@@ -435,5 +509,5 @@ Format:
     csv                             Outputs each file with its column value(s) on a line with each column value delimited by a comma
     json                            Outputs a JSON array with JSON objects holding the column value(s) of each file
     html                            Outputs HTML document with table
-    ", is_archive, is_audio, is_book, is_doc, is_image, is_source, is_video, Cyan.underline().paint("https://docs.rs/regex/1.5.4/regex/#syntax"));
+    ", Cyan.underline().paint("https://docs.rs/regex/1.10.2/regex/#syntax"));
 }
